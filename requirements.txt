@@ -1,0 +1,31 @@
+# =============================================================================
+# LabCD Essential (AgentPlant) — Python dependencies
+# Install:
+#   pip install -e "packages/labcd_agents[all]"
+#   pip install -r requirements.txt
+# =============================================================================
+
+# Shared LLM foundation (prefer editable install above)
+langchain
+langchain-openai
+langchain-core
+langchain-groq
+pydantic
+pyyaml
+python-dotenv
+httpx
+httpcore
+
+# AgentPlant core
+numpy
+sympy
+
+# Streamlit UI
+streamlit
+
+# FastAPI layer (backend_api/AgentPlant)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# Dev / tests
+pytest>=7.0
