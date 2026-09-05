@@ -1,8 +1,9 @@
 """Plant-model chat and artifact HTTP service adapters.
 
-Chat adapter drives ``backend_core.AgentPlant.PlantModelAgent``.
-Artifact helpers thin-wrap ``PlantCompiler`` + ``ArtifactStore`` so the unified
-Plant → Pre-Launch → Artifact hand-off matches ``frontend_streamlit/unified_app``.
+Chat adapter drives ``PlantModelAgent``, or ``MockPlantModelAgent`` when
+``LABCD_MOCK_MODE=1``. Artifact helpers thin-wrap ``PlantCompiler`` +
+``ArtifactStore`` so the unified Plant → Pre-Launch → Artifact hand-off
+matches ``frontend_streamlit/unified_app``.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from backend_core.AgentPlant import (
 )
 from backend_core.artifact_store import ArtifactStore
 from backend_core.plant_compiler import PlantCompiler, validate_pre_launch
+from backend_api.AgentPlant.mock_agent import MockPlantModelAgent
 from backend_api.AgentPlant.schemas import (
     ArtifactCreateRequest,
     ArtifactCreateResponse,
@@ -32,6 +34,7 @@ from backend_api.AgentPlant.schemas import (
     PlantPayload,
     PreLaunchConfig,
     TokenUsageOut,
+    ToolResult,
     ValidationRequest,
     ValidationResponse,
 )
@@ -77,13 +80,34 @@ def _infer_status(
     return "continue"
 
 
-def run_plant_model_chat(request: PlantModelChatRequest) -> PlantModelChatResponse:
-    """Run one plant-model turn and return a structured response."""
-    agent = PlantModelAgent(
+def _mock_mode_enabled() -> bool:
+    """True only when ``LABCD_MOCK_MODE=1`` (read at call time, not import)."""
+    return os.getenv("LABCD_MOCK_MODE", "0") == "1"
+
+
+def _create_chat_agent(
+    request: PlantModelChatRequest,
+) -> PlantModelAgent | MockPlantModelAgent:
+    """Select live or mock agent. Live construction stays equivalent to A2."""
+    if _mock_mode_enabled():
+        return MockPlantModelAgent(
+            model=request.model,
+            max_drafts=request.max_drafts,
+            min_user_turns_before_completion=request.min_user_turns_before_completion,
+        )
+    return PlantModelAgent(
         model=request.model,
         max_drafts=request.max_drafts,
         min_user_turns_before_completion=request.min_user_turns_before_completion,
     )
+
+
+def run_plant_model_chat(request: PlantModelChatRequest) -> PlantModelChatResponse:
+    """Run one plant-model turn and return a structured response."""
+    agent = _create_chat_agent(request)
+    if isinstance(agent, MockPlantModelAgent):
+        agent.request_attachment_ids = list(request.attachment_ids)
+        agent.request_web_search = request.web_search
     apply_session_state(agent, _to_agent_session_state(request.session_state))
     prev_draft_count = agent._draft_count
 
@@ -112,6 +136,12 @@ def run_plant_model_chat(request: PlantModelChatRequest) -> PlantModelChatRespon
         estimated_cost=agent.total_cost,
     )
 
+    hitl = None
+    tool_results: list[ToolResult] = []
+    if isinstance(agent, MockPlantModelAgent):
+        hitl = agent.last_hitl
+        tool_results = list(agent.last_tool_results)
+
     return PlantModelChatResponse(
         reply=reply,
         status=status,
@@ -119,6 +149,8 @@ def run_plant_model_chat(request: PlantModelChatRequest) -> PlantModelChatRespon
         session_state=session_state,
         usage=usage,
         conversation_id=request.conversation_id,
+        hitl=hitl,
+        tool_results=tool_results,
     )
 
 

@@ -7,12 +7,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from backend_api.AgentPlant.mock_agent import MockPlantModelAgent
 from backend_api.AgentPlant.schemas import (
     ChatMessage,
     PlantModelChatRequest,
     PlantModelSessionStateOut,
 )
-from backend_api.AgentPlant.service import run_plant_model_chat
+from backend_api.AgentPlant.service import (
+    _create_chat_agent,
+    run_plant_model_chat,
+)
 from backend_core.AgentPlant import (
     PlantModelSessionState,
     apply_session_state,
@@ -315,3 +319,172 @@ def test_persist_turn_combined_structured_assistant_message():
     assert assistant.hitl.question == "Confirm states?"
     assert assistant.tool_results[0].kind == "rag"
     assert assistant.tool_results[0].items[0].source == "ch4.pdf"
+
+
+def test_default_selects_live_plant_model_agent(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LABCD_MOCK_MODE", raising=False)
+    request = PlantModelChatRequest(user_message="hello", messages=[])
+    sentinel = MagicMock()
+    with patch(
+        "backend_api.AgentPlant.service.PlantModelAgent",
+        return_value=sentinel,
+    ) as ctor:
+        agent = _create_chat_agent(request)
+    ctor.assert_called_once_with(
+        model=request.model,
+        max_drafts=request.max_drafts,
+        min_user_turns_before_completion=request.min_user_turns_before_completion,
+    )
+    assert agent is sentinel
+
+
+def test_mock_mode_zero_selects_live_plant_model_agent(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "0")
+    request = PlantModelChatRequest(user_message="hello", messages=[])
+    sentinel = MagicMock()
+    with patch(
+        "backend_api.AgentPlant.service.PlantModelAgent",
+        return_value=sentinel,
+    ) as ctor:
+        agent = _create_chat_agent(request)
+    ctor.assert_called_once()
+    assert agent is sentinel
+
+
+def test_mock_mode_one_selects_mock_without_llm(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    request = PlantModelChatRequest(user_message="hello", messages=[])
+    with patch("backend_api.AgentPlant.service.PlantModelAgent") as ctor:
+        with patch("labcd_agents.providers.LLMFactory.create") as create:
+            agent = _create_chat_agent(request)
+    ctor.assert_not_called()
+    create.assert_not_called()
+    assert isinstance(agent, MockPlantModelAgent)
+
+
+def test_mock_hello_continue_includes_hitl(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    response = run_plant_model_chat(
+        PlantModelChatRequest(user_message="hello", messages=[])
+    )
+    assert response.status == "continue"
+    assert response.hitl is not None
+    assert len(response.hitl.options) == 3
+    assert response.hitl.allow_free_text is True
+    assert response.hitl.timeout_sec == 30
+
+
+def test_mock_hello_then_dc_motor_drafts(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    first = run_plant_model_chat(
+        PlantModelChatRequest(user_message="hello", messages=[])
+    )
+    assert first.status == "continue"
+    second = run_plant_model_chat(
+        PlantModelChatRequest(
+            user_message="DC motor",
+            messages=[
+                ChatMessage(role="user", content="hello"),
+                ChatMessage(role="assistant", content=first.reply),
+            ],
+            session_state=first.session_state,
+        )
+    )
+    assert second.status == "draft"
+    assert second.session_state.draft_count == 1
+    assert second.hitl is None
+
+
+def test_mock_draft_then_finish_completes(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    draft = run_plant_model_chat(
+        PlantModelChatRequest(user_message="DC motor", messages=[])
+    )
+    assert draft.status == "draft"
+    done = run_plant_model_chat(
+        PlantModelChatRequest(
+            user_message="finish",
+            messages=[
+                ChatMessage(role="user", content="DC motor"),
+                ChatMessage(role="assistant", content=draft.reply),
+            ],
+            session_state=draft.session_state,
+        )
+    )
+    assert done.status == "complete"
+    assert done.final_result is not None
+    assert done.final_result.system_name == "dc_motor"
+
+
+def test_mock_attachment_ids_return_rag(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    response = run_plant_model_chat(
+        PlantModelChatRequest(
+            user_message="hello",
+            messages=[],
+            attachment_ids=["doc-1"],
+        )
+    )
+    assert [item.kind for item in response.tool_results] == ["rag"]
+
+
+def test_mock_web_search_returns_search(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    response = run_plant_model_chat(
+        PlantModelChatRequest(
+            user_message="hello",
+            messages=[],
+            web_search=True,
+        )
+    )
+    assert [item.kind for item in response.tool_results] == ["search"]
+
+
+def test_mock_combined_tool_results_order(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    response = run_plant_model_chat(
+        PlantModelChatRequest(
+            user_message="hello",
+            messages=[],
+            attachment_ids=["doc-1"],
+            web_search=True,
+        )
+    )
+    assert [item.kind for item in response.tool_results] == ["rag", "search"]
+
+
+def test_mock_usage_is_zero(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    response = run_plant_model_chat(
+        PlantModelChatRequest(user_message="hello", messages=[])
+    )
+    assert response.usage is not None
+    assert response.usage.input_tokens == 0
+    assert response.usage.output_tokens == 0
+    assert response.usage.estimated_cost == 0.0
+
+
+def test_live_magicmock_usage_and_no_structured_leaks():
+    mock_agent = MagicMock()
+    mock_agent._draft_count = 0
+    mock_agent._latest_draft = None
+    mock_agent.step.return_value = ("What kind of plant is it?", None)
+    mock_agent.total_usage = SimpleNamespace(input_tokens=10, output_tokens=5)
+    mock_agent.total_cost = 0.001
+
+    with patch("backend_api.AgentPlant.service.PlantModelAgent", return_value=mock_agent):
+        with patch(
+            "backend_api.AgentPlant.service.export_session_state",
+            return_value=PlantModelSessionState(draft_count=0, latest_draft=None),
+        ):
+            response = run_plant_model_chat(
+                PlantModelChatRequest(user_message="hello", messages=[])
+            )
+
+    assert response.usage is not None
+    assert response.usage.input_tokens == 10
+    assert response.usage.estimated_cost == 0.001
+    assert response.hitl is None
+    assert response.tool_results == []
+    assert not isinstance(response.hitl, MagicMock)
+    assert not isinstance(response.tool_results, MagicMock)

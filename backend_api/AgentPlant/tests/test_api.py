@@ -189,6 +189,37 @@ def test_chat_persists_structured_fields_for_reload(client: TestClient):
     assert assistant["tool_results"][1]["items"][0]["url"] == "https://example.com/boost"
 
 
+def test_mock_mode_chat_hello_persists_hitl(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        r = client.post(
+            "/api/plant-model/chat",
+            json={"user_message": "hello", "messages": []},
+        )
+        create.assert_not_called()
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "continue"
+    assert data["hitl"] is not None
+    assert data["hitl"]["question"]
+    assert len(data["hitl"]["options"]) == 3
+    cid = data["conversation_id"]
+    assert cid is not None
+
+    detail = client.get(f"/api/plant-model/conversations/{cid}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assistant = body["messages"][1]
+    assert assistant["status"] == "continue"
+    assert assistant["hitl"] is not None
+    assert assistant["hitl"]["question"] == data["hitl"]["question"]
+
+
 # ---------------------------------------------------------------------------
 # Artifact routes
 # ---------------------------------------------------------------------------
