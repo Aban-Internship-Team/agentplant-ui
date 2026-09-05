@@ -6,12 +6,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, UploadFile, status
 
 from backend_api.AgentPlant.conversation_store import (
     ConversationAccessDenied,
     InMemoryConversationStore,
     default_store,
+)
+from backend_api.AgentPlant.files import (
+    MAX_UPLOAD_SIZE_BYTES,
+    FileUploadRejected,
+    default_file_store,
 )
 from backend_api.AgentPlant.schemas import (
     ArtifactCreateRequest,
@@ -19,6 +24,7 @@ from backend_api.AgentPlant.schemas import (
     ArtifactDetail,
     ArtifactPluginResponse,
     ArtifactSummary,
+    FileRef,
     PlantModelChatRequest,
     PlantModelChatResponse,
     PlantModelConversationDetail,
@@ -144,6 +150,30 @@ def delete_plant_model_conversation(
     except ConversationAccessDenied as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     _store().delete(conversation_id)
+
+
+@router.post("/files", response_model=FileRef)
+async def upload_plant_file(file: UploadFile) -> FileRef:
+    """Accept a file handle. Bytes are counted then discarded; only FileRef is kept."""
+    declared = getattr(file, "size", None)
+    try:
+        if declared is not None:
+            ref = default_file_store.register_upload(file.filename or "", int(declared))
+        else:
+            total = 0
+            while True:
+                chunk = await file.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_SIZE_BYTES:
+                    raise FileUploadRejected("file too large")
+            ref = default_file_store.register_upload(file.filename or "", total)
+    except FileUploadRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await file.close()
+    return ref
 
 
 @router.post("/chat", response_model=PlantModelChatResponse)

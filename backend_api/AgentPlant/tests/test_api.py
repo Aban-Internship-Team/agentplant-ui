@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend_api.AgentPlant.app import app
 from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
+from backend_api.AgentPlant.files import default_file_store
 from backend_api.AgentPlant.schemas import (
     HitlOption,
     HitlPrompt,
@@ -218,6 +219,44 @@ def test_mock_mode_chat_hello_persists_hitl(
     assert assistant["status"] == "continue"
     assert assistant["hitl"] is not None
     assert assistant["hitl"]["question"] == data["hitl"]["question"]
+
+
+def test_upload_then_mock_chat_returns_rag(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        uploaded = client.post(
+            "/api/plant-model/files",
+            files={
+                "file": ("paper.pdf", b"%PDF-1.4 fake-bytes", "application/pdf"),
+            },
+        )
+        assert uploaded.status_code == 200
+        body = uploaded.json()
+        assert body["file_id"]
+        assert body["name"] == "paper.pdf"
+
+        chat = client.post(
+            "/api/plant-model/chat",
+            json={
+                "user_message": "hello",
+                "messages": [],
+                "attachment_ids": [body["file_id"]],
+            },
+        )
+        create.assert_not_called()
+    assert chat.status_code == 200
+    data = chat.json()
+    kinds = [item["kind"] for item in data["tool_results"]]
+    assert kinds == ["rag"]
+    assert data["tool_results"][0]["items"][0]["source"] == "attached-document"
+    stored = default_file_store._refs[body["file_id"]]
+    assert stored.name == "paper.pdf"
+    assert set(stored.model_dump()) == {"file_id", "name"}
 
 
 # ---------------------------------------------------------------------------
