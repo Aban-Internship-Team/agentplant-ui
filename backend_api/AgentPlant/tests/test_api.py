@@ -10,10 +10,14 @@ from fastapi.testclient import TestClient
 from backend_api.AgentPlant.app import app
 from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
 from backend_api.AgentPlant.schemas import (
+    HitlOption,
+    HitlPrompt,
     PlantModelChatResponse,
     PlantModelResult,
     PlantModelSessionStateOut,
+    SearchHit,
     TokenUsageOut,
+    ToolResult,
 )
 
 
@@ -121,6 +125,69 @@ def test_chat_unknown_conversation(client: TestClient):
         },
     )
     assert r.status_code == 404
+
+
+def test_chat_persists_structured_fields_for_reload(client: TestClient):
+    fake = PlantModelChatResponse(
+        reply="Need one detail.",
+        status="draft",
+        final_result=None,
+        session_state=PlantModelSessionStateOut(draft_count=1),
+        usage=TokenUsageOut(input_tokens=1, output_tokens=1, estimated_cost=0.0),
+        hitl=HitlPrompt(
+            question="Which input is the duty cycle?",
+            options=[HitlOption(label="d"), HitlOption(label="Vin")],
+            allow_free_text=True,
+            timeout_sec=45,
+        ),
+        tool_results=[
+            ToolResult(
+                kind="rag",
+                items=[SearchHit(source="ch4.pdf", snippet="averaged CCM model")],
+            ),
+            ToolResult(
+                kind="search",
+                items=[
+                    SearchHit(
+                        source="Wikipedia · Boost converter",
+                        snippet="steps up DC voltage",
+                        url="https://example.com/boost",
+                    )
+                ],
+            ),
+        ],
+    )
+    with patch(
+        "backend_api.AgentPlant.router.run_plant_model_chat",
+        return_value=fake,
+    ):
+        r = client.post(
+            "/api/plant-model/chat",
+            json={
+                "user_message": "boost converter",
+                "messages": [],
+                "attachment_ids": ["file-1", "file-2"],
+            },
+        )
+    assert r.status_code == 200
+    cid = r.json()["conversation_id"]
+
+    detail = client.get(f"/api/plant-model/conversations/{cid}")
+    assert detail.status_code == 200
+    body = detail.json()
+    user, assistant = body["messages"]
+    assert user["role"] == "user"
+    assert user["attachment_ids"] == ["file-1", "file-2"]
+    assert assistant["status"] == "draft"
+    assert assistant["hitl"]["question"] == "Which input is the duty cycle?"
+    assert [opt["label"] for opt in assistant["hitl"]["options"]] == ["d", "Vin"]
+    assert assistant["hitl"]["allow_free_text"] is True
+    assert assistant["hitl"]["timeout_sec"] == 45
+    kinds = [item["kind"] for item in assistant["tool_results"]]
+    assert kinds == ["rag", "search"]
+    assert assistant["tool_results"][0]["items"][0]["url"] is None
+    assert assistant["tool_results"][1]["items"][0]["url"] == "https://example.com/boost"
+
 
 # ---------------------------------------------------------------------------
 # Artifact routes

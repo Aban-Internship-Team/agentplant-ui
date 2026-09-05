@@ -169,6 +169,10 @@ def plant_model_chat(
         llm_model=request.model,
         session_state=response.session_state,
         final_result=response.final_result,
+        user_attachment_ids=request.attachment_ids,
+        assistant_status=response.status,
+        assistant_hitl=response.hitl,
+        assistant_tool_results=response.tool_results,
     )
     response.conversation_id = conversation.id
     return response

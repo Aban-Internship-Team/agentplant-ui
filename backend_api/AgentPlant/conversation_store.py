@@ -13,8 +13,10 @@ from typing import Literal
 
 from backend_api.AgentPlant.schemas import (
     ChatMessage,
+    HitlPrompt,
     PlantModelResult,
     PlantModelSessionStateOut,
+    ToolResult,
 )
 
 
@@ -76,6 +78,10 @@ class InMemoryConversationStore:
         llm_model: str,
         session_state: PlantModelSessionStateOut,
         final_result: PlantModelResult | None,
+        user_attachment_ids: list[str] | None = None,
+        assistant_status: Literal["continue", "draft", "complete"] | None = None,
+        assistant_hitl: HitlPrompt | None = None,
+        assistant_tool_results: list[ToolResult] | None = None,
     ) -> ConversationRecord:
         with self._lock:
             conversation: ConversationRecord | None = None
@@ -99,9 +105,21 @@ class InMemoryConversationStore:
             conversation.llm_model = llm_model
             conversation.session_state = session_state
             conversation.updated_at = _now()
-            conversation.messages.append(ChatMessage(role="user", content=user_message))
             conversation.messages.append(
-                ChatMessage(role="assistant", content=assistant_reply)
+                ChatMessage(
+                    role="user",
+                    content=user_message,
+                    attachment_ids=list(user_attachment_ids or []),
+                )
+            )
+            conversation.messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content=assistant_reply,
+                    status=assistant_status,
+                    hitl=assistant_hitl,
+                    tool_results=list(assistant_tool_results or []),
+                )
             )
 
             if final_result is not None:

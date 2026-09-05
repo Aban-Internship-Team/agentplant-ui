@@ -177,3 +177,141 @@ def test_conversation_store_persist_and_list():
     assert store.get(1) is not None
     assert store.delete(1) is True
     assert store.get(1) is None
+
+
+def _legacy_persist_kwargs(**overrides):
+    from backend_api.AgentPlant.schemas import PlantModelSessionStateOut
+
+    kwargs = {
+        "user_id": None,
+        "conversation_id": None,
+        "user_message": "hello",
+        "assistant_reply": "What system?",
+        "llm_model": "gpt-4o-mini",
+        "session_state": PlantModelSessionStateOut(draft_count=0),
+        "final_result": None,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_persist_turn_legacy_omits_structured_fields():
+    from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
+
+    store = InMemoryConversationStore()
+    store.persist_turn(**_legacy_persist_kwargs())
+    loaded = store.get(1)
+    assert loaded is not None
+    user, assistant = loaded.messages
+    assert user.role == "user"
+    assert user.content == "hello"
+    assert user.attachment_ids == []
+    assert assistant.role == "assistant"
+    assert assistant.content == "What system?"
+    assert assistant.status is None
+    assert assistant.hitl is None
+    assert assistant.tool_results == []
+
+
+def test_persist_turn_status_round_trip():
+    from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
+
+    store = InMemoryConversationStore()
+    store.persist_turn(**_legacy_persist_kwargs(assistant_status="draft"))
+    loaded = store.get(1)
+    assert loaded is not None
+    assert loaded.messages[1].status == "draft"
+
+
+def test_persist_turn_hitl_round_trip():
+    from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
+    from backend_api.AgentPlant.schemas import HitlOption, HitlPrompt
+
+    hitl = HitlPrompt(
+        question="What system are you modelling?",
+        options=[HitlOption(label="DC motor"), HitlOption(label="CSTR")],
+        allow_free_text=False,
+        timeout_sec=30,
+    )
+    store = InMemoryConversationStore()
+    store.persist_turn(**_legacy_persist_kwargs(assistant_hitl=hitl))
+    loaded = store.get(1)
+    assert loaded is not None
+    saved = loaded.messages[1].hitl
+    assert saved is not None
+    assert saved.question == "What system are you modelling?"
+    assert [opt.label for opt in saved.options] == ["DC motor", "CSTR"]
+    assert saved.allow_free_text is False
+    assert saved.timeout_sec == 30
+
+
+def test_persist_turn_tool_results_round_trip():
+    from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
+    from backend_api.AgentPlant.schemas import SearchHit, ToolResult
+
+    tools = [
+        ToolResult(
+            kind="rag",
+            items=[SearchHit(source="notes.pdf", snippet="state-space form")],
+        ),
+        ToolResult(
+            kind="search",
+            items=[
+                SearchHit(
+                    source="Wikipedia · Boost",
+                    snippet="steps up DC voltage",
+                    url="https://example.com/boost",
+                )
+            ],
+        ),
+    ]
+    store = InMemoryConversationStore()
+    store.persist_turn(**_legacy_persist_kwargs(assistant_tool_results=tools))
+    loaded = store.get(1)
+    assert loaded is not None
+    saved = loaded.messages[1].tool_results
+    assert len(saved) == 2
+    assert saved[0].kind == "rag"
+    assert saved[0].items[0].source == "notes.pdf"
+    assert saved[0].items[0].url is None
+    assert saved[1].kind == "search"
+    assert saved[1].items[0].url == "https://example.com/boost"
+
+
+def test_persist_turn_attachment_ids_round_trip():
+    from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
+
+    store = InMemoryConversationStore()
+    store.persist_turn(
+        **_legacy_persist_kwargs(user_attachment_ids=["file-a", "file-b"])
+    )
+    loaded = store.get(1)
+    assert loaded is not None
+    assert loaded.messages[0].attachment_ids == ["file-a", "file-b"]
+    assert loaded.messages[1].attachment_ids == []
+
+
+def test_persist_turn_combined_structured_assistant_message():
+    from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
+    from backend_api.AgentPlant.schemas import HitlPrompt, SearchHit, ToolResult
+
+    hitl = HitlPrompt(question="Confirm states?")
+    tools = [
+        ToolResult(kind="rag", items=[SearchHit(source="ch4.pdf", snippet="ẋ = Ax + Bu")]),
+    ]
+    store = InMemoryConversationStore()
+    store.persist_turn(
+        **_legacy_persist_kwargs(
+            assistant_status="continue",
+            assistant_hitl=hitl,
+            assistant_tool_results=tools,
+        )
+    )
+    loaded = store.get(1)
+    assert loaded is not None
+    assistant = loaded.messages[1]
+    assert assistant.status == "continue"
+    assert assistant.hitl is not None
+    assert assistant.hitl.question == "Confirm states?"
+    assert assistant.tool_results[0].kind == "rag"
+    assert assistant.tool_results[0].items[0].source == "ch4.pdf"
