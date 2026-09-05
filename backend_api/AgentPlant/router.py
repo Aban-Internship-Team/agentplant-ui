@@ -29,9 +29,12 @@ from backend_api.AgentPlant.schemas import (
     PlantModelChatResponse,
     PlantModelConversationDetail,
     PlantModelConversationSummary,
+    SimulateRequest,
+    SimulateResponse,
     ValidationRequest,
     ValidationResponse,
 )
+from backend_api.AgentPlant.simulate import generate_mock_trajectory
 from backend_api.AgentPlant.service import (
     ArtifactValidationError,
     create_artifact,
@@ -206,6 +209,22 @@ def plant_model_chat(
     )
     response.conversation_id = conversation.id
     return response
+
+
+@router.post("/simulate", response_model=SimulateResponse)
+def simulate_plant(
+    request: SimulateRequest,
+    user_id: int | None = None,
+) -> SimulateResponse:
+    if request.conversation_id is not None:
+        existing = _store().get(request.conversation_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        try:
+            _assert_access(existing.user_id, user_id)
+        except ConversationAccessDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return generate_mock_trajectory(request)
 
 
 # ---------------------------------------------------------------------------

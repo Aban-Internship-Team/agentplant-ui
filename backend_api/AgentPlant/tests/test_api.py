@@ -259,6 +259,50 @@ def test_upload_then_mock_chat_returns_rag(
     assert set(stored.model_dump()) == {"file_id", "name"}
 
 
+def test_simulate_step_returns_timeseries(client: TestClient):
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        r = client.post(
+            "/api/plant-model/simulate",
+            json={
+                "total_simulation_time": 1.0,
+                "solver_sample_time": 0.25,
+                "input_type": "step",
+            },
+        )
+        create.assert_not_called()
+    assert r.status_code == 200
+    data = r.json()
+    assert data["t"][0] == 0.0
+    assert data["t"] == [0.0, 0.25, 0.5, 0.75, 1.0]
+    assert len(data["x"]) == len(data["t"])
+    assert len(data["u"]) == len(data["t"])
+    assert all(len(row) == 1 for row in data["u"])
+    assert data["warnings"] == []
+
+
+def test_simulate_unknown_conversation(client: TestClient):
+    r = client.post(
+        "/api/plant-model/simulate",
+        json={
+            "conversation_id": 99999,
+            "total_simulation_time": 1.0,
+            "solver_sample_time": 0.1,
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_simulate_invalid_horizon_unprocessable(client: TestClient):
+    r = client.post(
+        "/api/plant-model/simulate",
+        json={
+            "total_simulation_time": 0,
+            "solver_sample_time": 0.1,
+        },
+    )
+    assert r.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # Artifact routes
 # ---------------------------------------------------------------------------
