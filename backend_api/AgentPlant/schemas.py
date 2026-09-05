@@ -17,9 +17,50 @@ from backend_core.AgentPlant import (
 )
 
 
+class HitlOption(BaseModel):
+    """One clarifier option. The UI sends ``label`` back as ``user_message``."""
+
+    label: str
+
+
+class HitlPrompt(BaseModel):
+    """Optional HITL overlay on a ``continue`` turn (wire field: ``hitl``)."""
+
+    question: str
+    options: list[HitlOption] = Field(default_factory=list)
+    allow_free_text: bool = True
+    timeout_sec: int | None = None
+
+
+class SearchHit(BaseModel):
+    """One RAG citation or web-search row."""
+
+    source: str
+    snippet: str
+    url: str | None = None
+
+
+class ToolResult(BaseModel):
+    """In-thread tool card payload (RAG or web search)."""
+
+    kind: Literal["rag", "search"]
+    items: list[SearchHit] = Field(default_factory=list)
+
+
+class FileRef(BaseModel):
+    """Handle returned by file upload (A5). ``attachment_ids`` lists ``file_id``."""
+
+    file_id: str
+    name: str
+
+
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
+    status: Literal["continue", "draft", "complete"] | None = None
+    hitl: HitlPrompt | None = None
+    tool_results: list[ToolResult] = Field(default_factory=list)
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class PlantModelResult(BaseModel):
@@ -45,6 +86,8 @@ class PlantModelChatRequest(BaseModel):
         ge=1,
         le=5,
     )
+    attachment_ids: list[str] = Field(default_factory=list)
+    web_search: bool = False
 
 
 class TokenUsageOut(BaseModel):
@@ -60,6 +103,8 @@ class PlantModelChatResponse(BaseModel):
     session_state: PlantModelSessionStateOut
     usage: Optional[TokenUsageOut] = None
     conversation_id: int | None = None
+    hitl: HitlPrompt | None = None
+    tool_results: list[ToolResult] = Field(default_factory=list)
 
 
 class PlantModelConversationSummary(BaseModel):
@@ -167,5 +212,36 @@ class ValidationRequest(BaseModel):
 
 class ValidationResponse(BaseModel):
     ok: bool
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SimulateRequest(BaseModel):
+    """Open-loop simulate request. Source plant via ``conversation_id`` or ``plant``."""
+
+    conversation_id: int | None = None
+    plant: PlantPayload | None = None
+    input_type: Literal["step", "pulse", "sine"] = "step"
+    amplitude: float = 1.0
+    total_simulation_time: float = Field(gt=0)
+    solver_sample_time: float = Field(gt=0)
+    initial_state: list[float] = Field(default_factory=list)
+    pulse_width: float | None = None
+    frequency: float | None = None
+
+
+class SimulateResponse(BaseModel):
+    """Open-loop timeseries: samples of time, states, and inputs."""
+
+    t: list[float]
+    x: list[list[float]]
+    u: list[list[float]]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ErrorBody(BaseModel):
+    """Named form of the existing artifact-validation HTTP ``detail`` object."""
+
+    message: str
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
