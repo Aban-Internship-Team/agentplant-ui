@@ -303,6 +303,150 @@ def test_simulate_invalid_horizon_unprocessable(client: TestClient):
     assert r.status_code == 422
 
 
+_INTEGRATOR_PLANT = {
+    "system_name": "simple_integrator",
+    "python_code": (
+        "import numpy as np\n"
+        "def dynamics(t, x, u):\n"
+        "    return np.array([float(u[0])])\n"
+    ),
+}
+
+
+def _seed_sim_conversation(*, user_id=None, draft=None, final=None):
+    from backend_api.AgentPlant import router as router_mod
+
+    return router_mod.default_store.persist_turn(
+        user_id=user_id,
+        conversation_id=None,
+        user_message="hi",
+        assistant_reply="draft",
+        llm_model="mock",
+        session_state=PlantModelSessionStateOut(draft_count=1, latest_draft=draft),
+        final_result=final,
+    )
+
+
+def test_simulate_explicit_plant_sandboxed(client: TestClient):
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        r = client.post(
+            "/api/plant-model/simulate",
+            json={
+                "total_simulation_time": 1.0,
+                "solver_sample_time": 0.25,
+                "amplitude": 1.0,
+                "initial_state": [0.0],
+                "plant": _INTEGRATOR_PLANT,
+            },
+        )
+        create.assert_not_called()
+    assert r.status_code == 200
+    data = r.json()
+    assert data["x"][-1][0] > data["x"][0][0]
+
+
+def test_simulate_mock_mode_does_not_force_mock(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    r = client.post(
+        "/api/plant-model/simulate",
+        json={
+            "total_simulation_time": 1.0,
+            "solver_sample_time": 0.25,
+            "initial_state": [0.0],
+            "plant": _INTEGRATOR_PLANT,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["x"][-1][0] > 0
+
+
+def test_simulate_conversation_draft(client: TestClient):
+    draft = PlantModelResult.model_validate(_INTEGRATOR_PLANT)
+    conversation = _seed_sim_conversation(draft=draft)
+    r = client.post(
+        "/api/plant-model/simulate",
+        json={
+            "conversation_id": conversation.id,
+            "total_simulation_time": 1.0,
+            "solver_sample_time": 0.25,
+            "initial_state": [0.0],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["x"][-1][0] > 0
+
+
+def test_simulate_conversation_final_without_draft(client: TestClient):
+    final = PlantModelResult.model_validate(_INTEGRATOR_PLANT)
+    conversation = _seed_sim_conversation(final=final)
+    r = client.post(
+        "/api/plant-model/simulate",
+        json={
+            "conversation_id": conversation.id,
+            "total_simulation_time": 1.0,
+            "solver_sample_time": 0.25,
+            "initial_state": [0.0],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["x"][-1][0] > 0
+
+
+def test_simulate_explicit_plant_overrides_draft(client: TestClient):
+    draft = PlantModelResult.model_validate(_INTEGRATOR_PLANT)
+    conversation = _seed_sim_conversation(draft=draft)
+    hold = {
+        "system_name": "hold",
+        "python_code": (
+            "import numpy as np\n"
+            "def dynamics(t, x, u):\n"
+            "    return np.array([0.0 * x[0]])\n"
+        ),
+    }
+    r = client.post(
+        "/api/plant-model/simulate",
+        json={
+            "conversation_id": conversation.id,
+            "plant": hold,
+            "total_simulation_time": 1.0,
+            "solver_sample_time": 0.25,
+            "initial_state": [3.0],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["x"][-1] == [3.0]
+
+
+def test_simulate_access_denied(client: TestClient):
+    conversation = _seed_sim_conversation(user_id=1)
+    r = client.post(
+        "/api/plant-model/simulate",
+        params={"user_id": 2},
+        json={
+            "conversation_id": conversation.id,
+            "total_simulation_time": 1.0,
+            "solver_sample_time": 0.25,
+        },
+    )
+    assert r.status_code == 403
+
+
+def test_simulate_sandbox_failure_is_http_400(client: TestClient):
+    r = client.post(
+        "/api/plant-model/simulate",
+        json={
+            "total_simulation_time": 1.0,
+            "solver_sample_time": 0.25,
+            "plant": {
+                "system_name": "evil",
+                "python_code": "import os\ndef dynamics(t, x, u):\n    return x\n",
+            },
+        },
+    )
+    assert r.status_code == 400
+    assert "os" in r.json()["detail"].lower() or "import" in r.json()["detail"].lower()
+
+
 # ---------------------------------------------------------------------------
 # Artifact routes
 # ---------------------------------------------------------------------------

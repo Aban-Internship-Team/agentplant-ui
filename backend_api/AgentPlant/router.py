@@ -34,7 +34,14 @@ from backend_api.AgentPlant.schemas import (
     ValidationRequest,
     ValidationResponse,
 )
-from backend_api.AgentPlant.simulate import generate_mock_trajectory
+from backend_api.AgentPlant.sandbox import (
+    SandboxDynamicsError,
+    SandboxOutputError,
+    SandboxRejected,
+    SandboxSyntaxError,
+    SandboxTimeout,
+)
+from backend_api.AgentPlant.simulate import plant_from_conversation, run_simulation
 from backend_api.AgentPlant.service import (
     ArtifactValidationError,
     create_artifact,
@@ -216,15 +223,26 @@ def simulate_plant(
     request: SimulateRequest,
     user_id: int | None = None,
 ) -> SimulateResponse:
+    conversation = None
     if request.conversation_id is not None:
-        existing = _store().get(request.conversation_id)
-        if existing is None:
+        conversation = _store().get(request.conversation_id)
+        if conversation is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
         try:
-            _assert_access(existing.user_id, user_id)
+            _assert_access(conversation.user_id, user_id)
         except ConversationAccessDenied as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-    return generate_mock_trajectory(request)
+    resolved = plant_from_conversation(conversation)
+    try:
+        return run_simulation(request, resolved_plant=resolved)
+    except (
+        SandboxRejected,
+        SandboxSyntaxError,
+        SandboxDynamicsError,
+        SandboxTimeout,
+        SandboxOutputError,
+    ) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

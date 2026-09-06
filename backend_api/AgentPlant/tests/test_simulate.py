@@ -5,12 +5,15 @@ from __future__ import annotations
 import math
 from unittest.mock import patch
 
+import pytest
+
+from backend_api.AgentPlant.sandbox import SandboxRejected
 from backend_api.AgentPlant.schemas import PlantPayload, SimulateRequest
 from backend_api.AgentPlant.simulate import (
     MAX_SIM_SAMPLES,
     _CAPPED_WARNING,
-    _PLANT_IGNORED_WARNING,
     generate_mock_trajectory,
+    run_simulation,
 )
 
 
@@ -109,16 +112,13 @@ def test_default_frequency():
     assert [row[0] for row in response.u] == expected
 
 
-def test_malicious_plant_code_is_ignored():
+def test_malicious_plant_code_is_rejected_not_mocked():
     plant = PlantPayload(
         system_name="evil",
         python_code="raise RuntimeError('executed')\nexec('os.system(1)')",
     )
-    response = generate_mock_trajectory(_req(plant=plant, input_type="step"))
-    assert response.t
-    assert response.x
-    assert response.u
-    assert _PLANT_IGNORED_WARNING in response.warnings
+    with pytest.raises(SandboxRejected):
+        run_simulation(_req(plant=plant, input_type="step"))
 
 
 def test_sample_cap_and_warning():
@@ -131,17 +131,11 @@ def test_sample_cap_and_warning():
     assert _CAPPED_WARNING in response.warnings
 
 
-def test_no_exec_eval_or_subprocess():
-    plant = PlantPayload(
-        system_name="evil",
-        python_code="eval('1+1'); exec('pass')",
-    )
+def test_mock_path_does_not_exec_or_spawn():
     with patch("builtins.exec") as mocked_exec:
         with patch("builtins.eval") as mocked_eval:
             with patch("subprocess.run") as mocked_run:
-                with patch("subprocess.Popen") as mocked_popen:
-                    generate_mock_trajectory(_req(plant=plant, input_type="sine"))
+                generate_mock_trajectory(_req(input_type="sine"))
     mocked_exec.assert_not_called()
     mocked_eval.assert_not_called()
     mocked_run.assert_not_called()
-    mocked_popen.assert_not_called()
