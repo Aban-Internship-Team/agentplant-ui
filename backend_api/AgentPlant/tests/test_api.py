@@ -126,6 +126,12 @@ def test_chat_unknown_conversation(client: TestClient):
         },
     )
     assert r.status_code == 404
+    body = r.json()
+    assert set(body) == {"message", "errors", "warnings"}
+    assert "detail" not in body
+    assert body["message"] == "Conversation not found"
+    assert body["errors"] == ["Conversation not found"]
+    assert body["warnings"] == []
 
 
 def test_chat_persists_structured_fields_for_reload(client: TestClient):
@@ -290,6 +296,11 @@ def test_simulate_unknown_conversation(client: TestClient):
         },
     )
     assert r.status_code == 404
+    body = r.json()
+    assert set(body) == {"message", "errors", "warnings"}
+    assert "detail" not in body
+    assert body["message"] == "Conversation not found"
+    assert body["warnings"] == []
 
 
 def test_simulate_invalid_horizon_unprocessable(client: TestClient):
@@ -301,6 +312,12 @@ def test_simulate_invalid_horizon_unprocessable(client: TestClient):
         },
     )
     assert r.status_code == 422
+    body = r.json()
+    assert set(body) == {"message", "errors", "warnings"}
+    assert "detail" not in body
+    assert body["message"] == "Request validation failed"
+    assert any("body.total_simulation_time:" in item for item in body["errors"])
+    assert body["warnings"] == []
 
 
 _INTEGRATOR_PLANT = {
@@ -429,6 +446,12 @@ def test_simulate_access_denied(client: TestClient):
         },
     )
     assert r.status_code == 403
+    body = r.json()
+    assert set(body) == {"message", "errors", "warnings"}
+    assert "detail" not in body
+    assert body["message"] == "Conversation access denied"
+    assert body["errors"] == ["Conversation access denied"]
+    assert body["warnings"] == []
 
 
 def test_simulate_sandbox_failure_is_http_400(client: TestClient):
@@ -444,7 +467,12 @@ def test_simulate_sandbox_failure_is_http_400(client: TestClient):
         },
     )
     assert r.status_code == 400
-    assert "os" in r.json()["detail"].lower() or "import" in r.json()["detail"].lower()
+    body = r.json()
+    assert set(body) == {"message", "errors", "warnings"}
+    assert "detail" not in body
+    blob = (body["message"] + " " + " ".join(body["errors"])).lower()
+    assert "os" in blob or "import" in blob
+    assert body["warnings"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -562,9 +590,12 @@ def test_create_artifact_validation_error(artifact_client):
         },
     )
     assert r.status_code == 400
-    detail = r.json()["detail"]
-    assert "errors" in detail
-    assert detail["errors"]
+    body = r.json()
+    assert set(body) == {"message", "errors", "warnings"}
+    assert "detail" not in body
+    assert body["message"] == "Plant or pre-launch validation failed"
+    assert body["errors"]
+    assert isinstance(body["warnings"], list)
 
 
 def test_validate_endpoint(artifact_client):

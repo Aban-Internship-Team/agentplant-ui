@@ -27,6 +27,7 @@ try:
 except ImportError:
     pass
 
+from backend_api.AgentPlant.errors import register_exception_handlers
 from backend_api.AgentPlant.router import router as plant_model_router
 
 API_PREFIX = os.getenv("LABCD_API_PREFIX", "/api")
@@ -39,6 +40,7 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+register_exception_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
