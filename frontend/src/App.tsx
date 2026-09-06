@@ -1,10 +1,7 @@
+import ContractProbe from "./dev/ContractProbe.tsx";
+
 function App() {
-  return (
-    <main>
-      <h1>AgentPlant</h1>
-      <p>SPA scaffold is ready.</p>
-    </main>
-  );
+  return <ContractProbe />;
 }
 
 export default App;
