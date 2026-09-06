@@ -234,3 +234,28 @@ def test_integrator_keyword_fixture():
     agent.step([], "simple integrator")
     assert agent._latest_draft is not None
     assert agent._latest_draft["system_name"] == "simple_integrator"
+
+
+def test_reset_conversation_state_returns_to_continue():
+    agent = MockPlantModelAgent()
+    agent.step([], "DC motor")
+    assert agent._draft_count == 1
+    assert agent._latest_draft is not None
+    agent.reset_conversation_state()
+    assert agent._draft_count == 0
+    assert agent._latest_draft is None
+    reply, final = agent.step([], "hello")
+    assert final is None
+    assert agent.last_hitl is not None
+    assert reply == agent.last_hitl.question
+    assert agent._draft_count == 0
+
+
+def test_hi_motor_keyword_bypasses_hitl():
+    agent = MockPlantModelAgent()
+    reply, final = agent.step([], "hi motor")
+    assert final is None
+    assert agent.last_hitl is None
+    assert reply == "Draft: dc_motor"
+    assert agent._latest_draft is not None
+    assert agent._latest_draft["system_name"] == "dc_motor"

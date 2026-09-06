@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -113,7 +115,7 @@ def test_runtime_exception():
         "def dynamics(t, x, u):\n"
         "    raise RuntimeError('boom')\n"
     )
-    with pytest.raises(SandboxDynamicsError, match="boom"):
+    with pytest.raises(SandboxRejected, match="RuntimeError"):
         run_simulation(_req(plant=PlantPayload(system_name="bad", python_code=code)))
 
 
@@ -307,3 +309,61 @@ def test_worker_rejects_inferred_state_above_max_dim():
                 plant=PlantPayload(system_name="wide", python_code=code),
             )
         )
+
+
+def test_non_finite_derivative_is_rejected():
+    code = (
+        "import numpy as np\n"
+        "def dynamics(t, x, u):\n"
+        "    return np.array([float('nan')])\n"
+    )
+    with pytest.raises(SandboxDynamicsError, match="non-finite"):
+        run_simulation(
+            _req(
+                plant=PlantPayload(system_name="nan", python_code=code),
+                initial_state=[0.0],
+            )
+        )
+
+
+def test_non_finite_state_after_euler_is_rejected():
+    code = (
+        "import numpy as np\n"
+        "def dynamics(t, x, u):\n"
+        "    return np.array([1.6e308])\n"
+    )
+    with pytest.raises(SandboxDynamicsError, match="non-finite"):
+        run_simulation(
+            _req(
+                plant=PlantPayload(system_name="overflow", python_code=code),
+                initial_state=[0.0],
+                total_simulation_time=2.0,
+                solver_sample_time=0.25,
+            )
+        )
+
+
+def test_worker_receives_source_via_stdin_not_argv():
+    captured: dict[str, object] = {}
+    real_run = subprocess.run
+
+    def _wrap_run(*args, **kwargs):
+        captured["args"] = kwargs.get("args")
+        captured["input"] = kwargs.get("input")
+        return real_run(*args, **kwargs)
+
+    with patch("subprocess.run", side_effect=_wrap_run):
+        run_simulation(_req(initial_state=[0.0], amplitude=1.0))
+
+    argv = captured["args"]
+    blob = captured["input"]
+    assert isinstance(argv, list)
+    assert argv[0] == sys.executable
+    assert "-u" in argv
+    assert str(argv[-1]).endswith("sandbox.py")
+    joined = " ".join(str(part) for part in argv)
+    assert "def dynamics" not in joined
+    assert INTEGRATOR.split("\n", 1)[0] not in joined
+    assert isinstance(blob, (bytes, bytearray))
+    assert b"def dynamics" in blob
+    assert b'"source"' in blob

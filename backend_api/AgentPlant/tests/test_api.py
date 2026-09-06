@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend_api.AgentPlant.app import app
 from backend_api.AgentPlant.conversation_store import InMemoryConversationStore
-from backend_api.AgentPlant.files import default_file_store
+from backend_api.AgentPlant.files import MAX_UPLOAD_SIZE_BYTES, default_file_store
 from backend_api.AgentPlant.schemas import (
     HitlOption,
     HitlPrompt,
@@ -27,6 +27,50 @@ def client():
     store = InMemoryConversationStore()
     with patch("backend_api.AgentPlant.router.default_store", store):
         yield TestClient(app)
+
+
+def _enable_mock_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LABCD_MOCK_MODE", "1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+
+def _assert_error_body(response, *, status: int, contains: str | None = None) -> dict:
+    assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"message", "errors", "warnings"}
+    assert "detail" not in body
+    if contains is not None:
+        blob = (body["message"] + " " + " ".join(body["errors"])).lower()
+        assert contains.lower() in blob
+    return body
+
+
+def _hello_then_dc_motor(client: TestClient) -> tuple[dict, dict]:
+    """Two real mock-mode turns. Does not patch chat or seed the store."""
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        hello = client.post(
+            "/api/plant-model/chat",
+            json={"user_message": "hello", "messages": []},
+        )
+        assert hello.status_code == 200, hello.text
+        hello_body = hello.json()
+        cid = hello_body["conversation_id"]
+        draft = client.post(
+            "/api/plant-model/chat",
+            json={
+                "user_message": "DC motor",
+                "conversation_id": cid,
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": hello_body["reply"]},
+                ],
+                "session_state": hello_body["session_state"],
+            },
+        )
+        create.assert_not_called()
+    assert draft.status_code == 200, draft.text
+    return hello_body, draft.json()
 
 
 def _fake_chat_response(*, reply="ok", status="continue", conversation_id=None):
@@ -331,8 +375,9 @@ _INTEGRATOR_PLANT = {
 
 
 def _seed_sim_conversation(*, user_id=None, draft=None, final=None):
-    from backend_api.AgentPlant import router as router_mod
+    import importlib
 
+    router_mod = importlib.import_module("backend_api.AgentPlant.router")
     return router_mod.default_store.persist_turn(
         user_id=user_id,
         conversation_id=None,
@@ -634,3 +679,216 @@ def test_artifact_not_found(artifact_client):
         ).status_code
         == 404
     )
+
+
+# ---------------------------------------------------------------------------
+# A9 — real mock-mode HTTP integration
+# ---------------------------------------------------------------------------
+
+
+def test_mock_chat_draft_persists_on_get(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_mock_mode(monkeypatch)
+    hello_body, draft_body = _hello_then_dc_motor(client)
+    cid = draft_body["conversation_id"]
+    assert cid == hello_body["conversation_id"]
+    assert draft_body["status"] == "draft"
+    assert draft_body["session_state"]["latest_draft"]["system_name"] == "dc_motor"
+    assert draft_body["hitl"] is None
+    assert draft_body["final_result"] is None
+
+    detail = client.get(f"/api/plant-model/conversations/{cid}")
+    assert detail.status_code == 200
+    stored = detail.json()
+    assert stored["status"] == "active"
+    assert stored["session_state"]["latest_draft"]["system_name"] == "dc_motor"
+    assert stored["session_state"]["draft_count"] == 1
+    assert stored["final_result"] is None
+    assert len(stored["messages"]) == 4
+    draft_assistant = stored["messages"][3]
+    assert draft_assistant["role"] == "assistant"
+    assert draft_assistant["status"] == "draft"
+    assert draft_assistant["content"] == draft_body["reply"]
+    assert draft_assistant["hitl"] is None
+
+
+def test_mock_chat_draft_simulate_uses_sandbox(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_mock_mode(monkeypatch)
+    _hello_body, draft_body = _hello_then_dc_motor(client)
+    cid = draft_body["conversation_id"]
+    payload = {
+        "conversation_id": cid,
+        "total_simulation_time": 1.0,
+        "solver_sample_time": 0.25,
+        "amplitude": 1.0,
+    }
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        live = client.post("/api/plant-model/simulate", json=payload)
+        no_plant = client.post(
+            "/api/plant-model/simulate",
+            json={
+                "total_simulation_time": 1.0,
+                "solver_sample_time": 0.25,
+                "amplitude": 1.0,
+            },
+        )
+        create.assert_not_called()
+    assert live.status_code == 200, live.text
+    assert no_plant.status_code == 200
+    data = live.json()
+    mock = no_plant.json()
+    assert len(data["t"]) == len(data["x"]) == len(data["u"])
+    assert len(data["x"][0]) == 2
+    assert len(mock["x"][0]) == 1
+    assert data["x"] != mock["x"]
+    assert data["t"] == mock["t"]
+
+
+def test_mock_chat_draft_then_finish_completes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_mock_mode(monkeypatch)
+    hello_body, draft_body = _hello_then_dc_motor(client)
+    cid = draft_body["conversation_id"]
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        finished = client.post(
+            "/api/plant-model/chat",
+            json={
+                "user_message": "finish",
+                "conversation_id": cid,
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": hello_body["reply"]},
+                    {"role": "user", "content": "DC motor"},
+                    {"role": "assistant", "content": draft_body["reply"]},
+                ],
+                "session_state": draft_body["session_state"],
+            },
+        )
+        create.assert_not_called()
+    assert finished.status_code == 200, finished.text
+    body = finished.json()
+    assert body["status"] == "complete"
+    assert body["final_result"] is not None
+    assert "def dynamics" in body["final_result"]["python_code"]
+
+    detail = client.get(f"/api/plant-model/conversations/{cid}")
+    assert detail.status_code == 200
+    stored = detail.json()
+    assert stored["status"] == "complete"
+    assert stored["final_result"] is not None
+    assert stored["final_result"]["system_name"] == "dc_motor"
+    assert "def dynamics" in stored["final_result"]["python_code"]
+
+
+def test_mock_chat_web_search_http(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_mock_mode(monkeypatch)
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        r = client.post(
+            "/api/plant-model/chat",
+            json={"user_message": "hello", "messages": [], "web_search": True},
+        )
+        create.assert_not_called()
+    assert r.status_code == 200
+    kinds = [item["kind"] for item in r.json()["tool_results"]]
+    assert kinds == ["search"]
+
+
+def test_chat_access_denied_is_error_body(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_mock_mode(monkeypatch)
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        owned = client.post(
+            "/api/plant-model/chat",
+            params={"user_id": 1},
+            json={"user_message": "hello", "messages": []},
+        )
+        create.assert_not_called()
+    assert owned.status_code == 200
+    cid = owned.json()["conversation_id"]
+    denied = client.post(
+        "/api/plant-model/chat",
+        params={"user_id": 2},
+        json={
+            "user_message": "DC motor",
+            "conversation_id": cid,
+            "messages": [],
+        },
+    )
+    _assert_error_body(denied, status=403, contains="access denied")
+
+
+def test_conversation_get_access_denied_is_error_body(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_mock_mode(monkeypatch)
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        owned = client.post(
+            "/api/plant-model/chat",
+            params={"user_id": 1},
+            json={"user_message": "hello", "messages": []},
+        )
+        create.assert_not_called()
+    cid = owned.json()["conversation_id"]
+    denied = client.get(
+        f"/api/plant-model/conversations/{cid}",
+        params={"user_id": 2},
+    )
+    _assert_error_body(denied, status=403, contains="access denied")
+
+
+def test_upload_empty_file_is_error_body(client: TestClient):
+    r = client.post(
+        "/api/plant-model/files",
+        files={"file": ("empty.pdf", b"", "application/pdf")},
+    )
+    _assert_error_body(r, status=400, contains="empty file")
+
+
+def test_upload_oversized_file_is_error_body(client: TestClient):
+    r = client.post(
+        "/api/plant-model/files",
+        files={
+            "file": (
+                "big.pdf",
+                b"x" * (MAX_UPLOAD_SIZE_BYTES + 1),
+                "application/pdf",
+            ),
+        },
+    )
+    _assert_error_body(r, status=400, contains="file too large")
+
+
+def test_artifact_incomplete_conversation_is_error_body(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_mock_mode(monkeypatch)
+    with patch("labcd_agents.providers.LLMFactory.create") as create:
+        hello = client.post(
+            "/api/plant-model/chat",
+            json={"user_message": "hello", "messages": []},
+        )
+        create.assert_not_called()
+    assert hello.status_code == 200
+    r = client.post(
+        "/api/plant-model/artifacts",
+        json={
+            "conversation_id": hello.json()["conversation_id"],
+            "pre_launch": _minimal_pre_launch(0),
+        },
+    )
+    body = _assert_error_body(r, status=400, contains="not complete")
+    assert body["warnings"] == []

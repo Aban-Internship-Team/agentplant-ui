@@ -293,3 +293,40 @@ def test_handlers_are_registered_on_app():
     assert RequestValidationError in handlers
     assert StarletteHTTPException in handlers
     assert Exception in handlers
+
+
+def test_artifact_422_does_not_echo_python_code_sentinel(api_client: TestClient):
+    sentinel = "A9_PYCODE_SENTINEL_9f3c2e1a_do_not_echo"
+    r = api_client.post(
+        "/api/plant-model/artifacts",
+        json={
+            "plant": {
+                "system_name": "x",
+                "python_code": (
+                    f"def dynamics(t, x, u):\n    return ['{sentinel}']\n"
+                ),
+            },
+            "pre_launch": {
+                "total_simulation_time": 10.0,
+                "solver_sample_time": 0,
+                "initial_state": [],
+                "default_target": [],
+            },
+        },
+    )
+    assert r.status_code == 422
+    body = _assert_envelope(r.json())
+    assert body["message"] == "Request validation failed"
+    assert any("body.pre_launch.solver_sample_time:" in item for item in body["errors"])
+    assert sentinel not in r.text
+    assert '"input"' not in r.text
+
+
+def test_artifact_not_found_is_error_body(api_client: TestClient):
+    r = api_client.get("/api/plant-model/artifacts/does-not-exist-a9-404")
+    assert r.status_code == 404
+    body = _assert_envelope(r.json())
+    assert body["warnings"] == []
+    assert "C:\\" not in r.text
+    assert "/Users/" not in r.text
+    assert "Traceback" not in r.text
